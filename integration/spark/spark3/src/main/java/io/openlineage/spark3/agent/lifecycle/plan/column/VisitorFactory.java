@@ -22,6 +22,7 @@ import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.Gener
 import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.IcebergMergeIntoVisitor;
 import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.JoinVisitor;
 import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.OperatorVisitor;
+import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.PandasOperatorVisitor;
 import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.ProjectVisitor;
 import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.SortVisitor;
 import io.openlineage.spark3.agent.lifecycle.plan.column.visitors.operator.TypedBoundaryFanInVisitor;
@@ -56,7 +57,13 @@ class VisitorFactory {
             // would double-claim the boundary and emit DIRECT edges across an opaque closure.
             // See docs/design/typed-boundary-emission-policy.md.
             new TypedBoundaryFanInVisitor(),
-            new TypedGroupByVisitor()));
+            new TypedGroupByVisitor(),
+            // Pandas operators (mapInPandas/mapInArrow, applyInPandas/applyInArrow): disjoint from
+            // all existing operator visitors — no SerializeFromObject boundary, no
+            // UserDefinedExpression at the operator level (the PythonUDF in functionExpr is never
+            // routed through an expression visitor). The fan-in claim is exact (Spark marshals
+            // exactly the UDF's argument columns), so it ships unflagged.
+            new PandasOperatorVisitor()));
   }
 
   List<ExpressionVisitor> expressionVisitors() {

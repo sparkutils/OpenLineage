@@ -29,7 +29,8 @@ public class ColumnLineageConfig {
   /**
    * Determines whether a pessimistic fan-in is emitted across a typed Dataset boundary (the
    * {@code DeserializeToObject} / {@code SerializeFromObject} pair produced by {@code map},
-   * {@code mapPartitions}, {@code flatMap} and {@code mapGroups}).
+   * {@code mapPartitions}, {@code flatMap}, {@code mapGroups} and {@code mapGroupsWithState} /
+   * {@code flatMapGroupsWithState}).
    *
    * <p>A typed operation hands the whole row to a lambda as a single JVM object, so per-field
    * lineage is not recoverable from the logical plan. When this flag is enabled every output field
