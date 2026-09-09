@@ -45,8 +45,10 @@ class Dependency {
   public Dependency merge(Dependency dependency) {
     if (this.transformationInfo != null) {
       TransformationInfo merged = this.transformationInfo.merge(dependency.getTransformationInfo());
-      if (merged.equals(transformationInfo)) {
-        // exactly the same dependency would work
+      if (merged.equals(dependency.getTransformationInfo())) {
+        // The merge result is exactly the argument's transformation info, so the argument is
+        // already the dependency we want (its exprId and transformationInfo are both correct) and
+        // can be reused without allocating a new object.
         return dependency;
       } else {
         return new Dependency(dependency.exprId, merged);

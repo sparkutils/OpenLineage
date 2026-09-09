@@ -19,13 +19,20 @@ import org.apache.spark.sql.catalyst.expressions.ExprId;
 import org.apache.spark.sql.catalyst.expressions.Expression;
 import org.apache.spark.sql.catalyst.expressions.NamedExpression;
 import org.apache.spark.sql.catalyst.plans.logical.AppendColumns;
+import org.apache.spark.sql.catalyst.plans.logical.AppendColumnsWithObject;
+import org.apache.spark.sql.catalyst.plans.logical.DeserializeToObject;
+import org.apache.spark.sql.catalyst.plans.logical.FlatMapGroupsWithState;
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan;
 import org.apache.spark.sql.catalyst.plans.logical.MapGroups;
+import scala.collection.immutable.Seq;
 
 /**
  * Records the {@code INDIRECT/GROUP_BY} dependency of a <b>typed</b> grouping, i.e. {@code
  * Dataset.groupByKey(...).mapGroups/flatMapGroups/reduceGroups}, which produces a {@link MapGroups}
- * over an {@link AppendColumns}. Without this the untyped
+ * over an {@link AppendColumns}, and {@code groupByKey(...).mapGroupsWithState/flatMapGroupsWithState},
+ * which produces a {@link FlatMapGroupsWithState} over an {@link AppendColumns}, and
+ * {@code groupByKey(...).transformWithState}, which produces a {@code TransformWithState} (Spark 4+
+ * arbitrary state API v2) over an {@link AppendColumns}. Without this the untyped
  *
  * <pre>{@code df.groupBy("dept").agg(...)}</pre>
  *
@@ -34,6 +41,11 @@ import org.apache.spark.sql.catalyst.plans.logical.MapGroups;
  * <pre>{@code ds.groupByKey(p -> p.getDept()).mapGroups(...)}</pre>
  *
  * records none, so a typed grouping is invisible to anything consuming the facet.
+ *
+ * <p>The {@code TransformWithState} node is absent on the 3.5.0 compile classpath, so it is matched
+ * reflectively via {@link TransformWithStateReflector} (the same {@code safeIsInstanceOf} pattern
+ * used for {@code CreateHiveTableAsSelectCommand}); the AppendColumns resolution is unchanged
+ * because {@code groupByKey} wraps the child in {@link AppendColumns} identically.
  *
  * <h2>Why the grouping key needs resolving through AppendColumns</h2>
  *
@@ -79,14 +91,14 @@ public class TypedGroupByVisitor implements OperatorVisitor {
 
   @Override
   public boolean isDefinedAt(LogicalPlan operator) {
-    return operator instanceof MapGroups;
+    return operator instanceof MapGroups
+        || operator instanceof FlatMapGroupsWithState
+        || TransformWithStateReflector.isTransformWithState(operator);
   }
 
   @Override
   public void apply(LogicalPlan operator, ColumnLevelLineageBuilder builder) {
-    MapGroups mapGroups = (MapGroups) operator;
-
-    Set<Expression> groupingSources = groupingSources(mapGroups);
+    Set<Expression> groupingSources = groupingSources(operator);
     if (groupingSources.isEmpty()) {
       return;
     }
@@ -104,19 +116,108 @@ public class TypedGroupByVisitor implements OperatorVisitor {
   /**
    * Resolves the grouping attributes to expressions that actually reference the relation below. For
    * each grouping attribute this is the deserializer of the {@link AppendColumns} that computed it;
-   * a grouping attribute not produced by an {@link AppendColumns} is used as-is, which is the
-   * correct handling for a grouping on a real column.
+   * when the grouping key was appended by an {@link AppendColumnsWithObject} (a preceding typed map
+   * made the intermediate object-typed, so the append node is the object variant) the deserializer
+   * of the {@link DeserializeToObject} below is used, because the value deserializer references the
+   * intermediate fields re-serialized from the opaque object (the {@code _1.._n} of a tuple /
+   * case-class encoder) rather than the real columns. A grouping attribute not produced by either
+   * is used as-is, which is the correct handling for a grouping on a real column.
    */
-  private static Set<Expression> groupingSources(MapGroups mapGroups) {
+  private static Set<Expression> groupingSources(LogicalPlan operator) {
     Set<Expression> sources = new LinkedHashSet<>();
-    ScalaConversionUtils.<Attribute>fromSeq(mapGroups.groupingAttributes())
+    Seq<Attribute> groupingAttrs = groupingAttributes(operator);
+    if (groupingAttrs == null) {
+      return sources;
+    }
+    ScalaConversionUtils.<Attribute>fromSeq(groupingAttrs)
         .forEach(
-            attribute ->
-                sources.add(
-                    appendColumnsProducing(mapGroups.child(), attribute.exprId())
-                        .map(AppendColumns::deserializer)
-                        .orElse(attribute)));
+            attribute -> {
+              Optional<AppendColumns> appendColumns =
+                  appendColumnsProducing(child(operator), attribute.exprId());
+              if (appendColumns.isPresent()) {
+                sources.add(appendColumns.get().deserializer());
+              } else {
+                Optional<AppendColumnsWithObject> appendColumnsWithObject =
+                    appendColumnsWithObjectProducing(child(operator), attribute.exprId());
+                if (appendColumnsWithObject.isPresent()) {
+                  sources.add(
+                      DeserializeToObjectUtils.deserializerBelow(appendColumnsWithObject.get())
+                          .orElseGet(() -> valueDeserializer(operator)));
+                } else {
+                  sources.add(attribute);
+                }
+              }
+            });
     return sources;
+  }
+
+  private static Seq<Attribute> groupingAttributes(LogicalPlan operator) {
+    if (operator instanceof MapGroups) {
+      return ((MapGroups) operator).groupingAttributes();
+    }
+    if (operator instanceof FlatMapGroupsWithState) {
+      return ((FlatMapGroupsWithState) operator).groupingAttributes();
+    }
+    // TransformWithState (Spark 4+, absent on 3.5) — read reflectively.
+    return TransformWithStateReflector.groupingAttributes(operator).orElse(null);
+  }
+
+  private static LogicalPlan child(LogicalPlan operator) {
+    if (operator instanceof MapGroups) {
+      return ((MapGroups) operator).child();
+    }
+    if (operator instanceof FlatMapGroupsWithState) {
+      return ((FlatMapGroupsWithState) operator).child();
+    }
+    // TransformWithState — the left side (the data, wrapped in AppendColumns by groupByKey).
+    // The right side is a dummy empty LocalRelation when hasInitialState is false and is NOT
+    // a real input; the grouping's real input is the left child.
+    return TransformWithStateReflector.child(operator).orElse(null);
+  }
+
+  /** The value deserializer of a grouping operator. See {@link #groupingSources} for the
+   * role of the value deserializer when the intermediate was made object-typed by a preceding
+   * typed map.
+   */
+  private static Expression valueDeserializer(LogicalPlan operator) {
+    if (operator instanceof MapGroups) {
+      return ((MapGroups) operator).valueDeserializer();
+    }
+    if (operator instanceof FlatMapGroupsWithState) {
+      return ((FlatMapGroupsWithState) operator).valueDeserializer();
+    }
+    // TransformWithState — read reflectively; null when not readable.
+    return TransformWithStateReflector.valueDeserializer(operator).orElse(null);
+  }
+
+  /**
+   * Finds the {@link AppendColumnsWithObject} in the subtree whose {@code newColumnsSerializer}
+   * include {@code exprId}. The object variant appears when a preceding typed map made the
+   * intermediate object-typed; it has no {@code deserializer()}, so the grouping key is resolved
+   * through the {@link DeserializeToObject} below it instead.
+   */
+  private static Optional<AppendColumnsWithObject> appendColumnsWithObjectProducing(
+      LogicalPlan node, ExprId exprId) {
+    if (node == null) {
+      return Optional.empty();
+    }
+
+    if (node instanceof AppendColumnsWithObject) {
+      AppendColumnsWithObject appendColumns = (AppendColumnsWithObject) node;
+      boolean produces =
+          ScalaConversionUtils.<NamedExpression>fromSeq(appendColumns.newColumnsSerializer())
+              .stream()
+              .anyMatch(column -> column.exprId().equals(exprId));
+      if (produces) {
+        return Optional.of(appendColumns);
+      }
+    }
+
+    return ScalaConversionUtils.<LogicalPlan>fromSeq(node.children()).stream()
+        .map(child -> appendColumnsWithObjectProducing(child, exprId))
+        .filter(Optional::isPresent)
+        .findFirst()
+        .orElse(Optional.empty());
   }
 
   /**
