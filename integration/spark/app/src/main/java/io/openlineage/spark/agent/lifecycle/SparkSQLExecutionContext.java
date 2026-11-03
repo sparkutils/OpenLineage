@@ -79,7 +79,12 @@ class SparkSQLExecutionContext implements ExecutionContext {
       OpenLineageContext olContext,
       OpenLineageRunEventBuilder runEventBuilder) {
     this.executionId = executionId;
-    this.sess = Spark4CompatUtils.getSparkSession(SQLExecution.getQueryExecution(executionId));
+    var ex = SQLExecution.getQueryExecution(executionId);
+    if (ex != null) {
+        this.sess = Spark4CompatUtils.getSparkSession(ex);
+    } else {
+        this.sess = null;
+    }
     this.eventEmitter = eventEmitter;
     this.olContext = olContext;
     this.runEventBuilder = runEventBuilder;

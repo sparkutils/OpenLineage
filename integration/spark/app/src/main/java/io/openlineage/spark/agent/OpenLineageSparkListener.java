@@ -139,8 +139,10 @@ public class OpenLineageSparkListener extends org.apache.spark.scheduler.SparkLi
       SparkSession osess = SparkSession.getActiveSession().getOrElse(() -> null);
       try {
           var que = SQLExecution.getQueryExecution(startEvent.executionId());
-          var sess = Spark4CompatUtils.getSparkSession(que);
-          SparkSession.setActiveSession(sess);
+          if (que != null) {
+              var sess = Spark4CompatUtils.getSparkSession(que);
+              SparkSession.setActiveSession(sess);
+          }
 
           getSparkSQLExecutionContext(startEvent.executionId())
                   .ifPresent(
@@ -163,8 +165,10 @@ public class OpenLineageSparkListener extends org.apache.spark.scheduler.SparkLi
       SparkSession osess = SparkSession.getActiveSession().getOrElse(() -> null);
       try {
           var que = SQLExecution.getQueryExecution(endEvent.executionId());
-          var sess = Spark4CompatUtils.getSparkSession(que);
-          SparkSession.setActiveSession(sess);
+          if (que != null) {
+              var sess = Spark4CompatUtils.getSparkSession(que);
+              SparkSession.setActiveSession(sess);
+          }
 
           log.debug("sparkSQLExecEnd with activeJobId {}", activeJobId);
     ExecutionContext context = sparkSqlExecutionRegistry.remove(endEvent.executionId());
