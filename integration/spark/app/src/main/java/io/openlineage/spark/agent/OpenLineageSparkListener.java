@@ -17,6 +17,7 @@ import io.openlineage.client.OpenLineageConfig;
 import io.openlineage.client.circuitBreaker.CircuitBreaker;
 import io.openlineage.client.circuitBreaker.CircuitBreakerFactory;
 import io.openlineage.client.circuitBreaker.NoOpCircuitBreaker;
+import io.openlineage.client.job.Naming;
 import io.openlineage.client.metrics.MicrometerProvider;
 import io.openlineage.client.utils.RuntimeUtils;
 import io.openlineage.spark.agent.lifecycle.ContextFactory;
@@ -50,6 +51,7 @@ import org.apache.spark.scheduler.SparkListenerJobEnd;
 import org.apache.spark.scheduler.SparkListenerJobStart;
 import org.apache.spark.scheduler.SparkListenerTaskEnd;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.execution.SQLExecution;
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionEnd;
 import org.apache.spark.sql.execution.ui.SparkListenerSQLExecutionStart;
 import scala.Function0;
@@ -134,22 +136,37 @@ public class OpenLineageSparkListener extends org.apache.spark.scheduler.SparkLi
 
   /** called by the SparkListener when a spark-sql (Dataset api) execution starts */
   private void sparkSQLExecStart(SparkListenerSQLExecutionStart startEvent) {
-    getSparkSQLExecutionContext(startEvent.executionId())
-        .ifPresent(
-            context -> {
-              meterRegistry.counter("openlineage.spark.event.sql.start").increment();
-              circuitBreaker.run(
-                  () -> {
-                    activeJobId.ifPresent(context::setActiveJobId);
-                    context.start(startEvent);
-                    return null;
-                  });
-            });
+      SparkSession osess = SparkSession.getActiveSession().getOrElse(() -> null);
+      try {
+          var que = SQLExecution.getQueryExecution(startEvent.executionId());
+          var sess = Spark4CompatUtils.getSparkSession(que);
+          SparkSession.setActiveSession(sess);
+
+          getSparkSQLExecutionContext(startEvent.executionId())
+                  .ifPresent(
+                          context -> {
+                              meterRegistry.counter("openlineage.spark.event.sql.start").increment();
+                              circuitBreaker.run(
+                                      () -> {
+                                          activeJobId.ifPresent(context::setActiveJobId);
+                                          context.start(startEvent);
+                                          return null;
+                                      });
+                          });
+      } finally {
+          SparkSession.setActiveSession(osess);
+      }
   }
 
   /** called by the SparkListener when a spark-sql (Dataset api) execution ends */
   private void sparkSQLExecEnd(SparkListenerSQLExecutionEnd endEvent) {
-    log.debug("sparkSQLExecEnd with activeJobId {}", activeJobId);
+      SparkSession osess = SparkSession.getActiveSession().getOrElse(() -> null);
+      try {
+          var que = SQLExecution.getQueryExecution(endEvent.executionId());
+          var sess = Spark4CompatUtils.getSparkSession(que);
+          SparkSession.setActiveSession(sess);
+
+          log.debug("sparkSQLExecEnd with activeJobId {}", activeJobId);
     ExecutionContext context = sparkSqlExecutionRegistry.remove(endEvent.executionId());
     meterRegistry.counter("openlineage.spark.event.sql.end").increment();
     if (context != null) {
@@ -171,6 +188,9 @@ public class OpenLineageSparkListener extends org.apache.spark.scheduler.SparkLi
                         return null;
                       }));
     }
+      } finally {
+          SparkSession.setActiveSession(osess);
+      }
   }
 
   /** called by the SparkListener when a job starts */

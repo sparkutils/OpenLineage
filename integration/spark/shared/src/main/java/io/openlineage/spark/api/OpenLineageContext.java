@@ -33,6 +33,8 @@ import org.apache.spark.sql.execution.QueryExecution;
 import org.apache.spark.sql.execution.SparkPlan;
 import scala.PartialFunction;
 
+import static io.openlineage.spark.agent.ArgumentParser.SPARK_CONF_PARENT_RUN_ID;
+
 /**
  * Context holder with references to several required objects during construction of an OpenLineage
  * {@link OpenLineage.RunEvent}. An {@link OpenLineageContext} should be created once for every
@@ -60,14 +62,19 @@ public class OpenLineageContext {
   @Default @NonNull @Getter
   DatasetBuilderFactory datasetBuilderFactory = DatasetBuilderFactory.EMPTY;
 
+  final UUID backupRunId = UUIDUtils.generateNewUUID();
   // filled up for SparkListener non-application events
-  @Default @NonNull @Getter final UUID runUuid = UUIDUtils.generateNewUUID();
-
-  /** {@link SparkSession} instance when an application is using a Spark SQL configuration */
-  final SparkSession sparkSession;
+  public UUID getRunUuid() {
+      return getSparkSession().map(
+              sess ->
+                      sess.conf().getOption(SPARK_CONF_PARENT_RUN_ID).map(
+                              UUID::fromString
+                      ).getOrElse( () -> backupRunId )
+      ).orElse(backupRunId);
+  }
 
   public Optional<SparkSession> getSparkSession() {
-    return Optional.ofNullable(sparkSession);
+    return Optional.ofNullable(SparkSession.getActiveSession().getOrElse( () -> null));
   }
 
   /** The {@link SparkContext} running for the application we're reporting run data for */
@@ -320,7 +327,7 @@ public class OpenLineageContext {
   public String toString() {
     return new StringJoiner(", ", OpenLineageContext.class.getSimpleName() + "[", "]")
         .add("applicationUuid=" + applicationUuid)
-        .add("runUuid=" + runUuid)
+        .add("runUuid=" + getRunUuid())
         .add("jobName='" + jobName + "'")
         .toString();
   }

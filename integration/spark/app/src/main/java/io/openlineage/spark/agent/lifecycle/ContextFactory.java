@@ -103,7 +103,7 @@ public class ContextFactory {
     SparkSession sparkSession = Spark4CompatUtils.getSparkSession(queryExecution);
     OpenLineageContext olContext =
         OpenLineageContext.builder()
-            .sparkSession(sparkSession)
+            //.sparkSession(sparkSession)
             .sparkContext(sparkSession.sparkContext())
             .openLineage(new OpenLineage(Versions.OPEN_LINEAGE_PRODUCER_URI))
             .queryExecution(queryExecution)
@@ -132,7 +132,7 @@ public class ContextFactory {
               SparkSession sparkSession = Spark4CompatUtils.getSparkSession(queryExecution);
               OpenLineageContext olContext =
                   OpenLineageContext.builder()
-                      .sparkSession(sparkSession)
+                      //.sparkSession(sparkSession)
                       .sparkContext(sparkSession.sparkContext())
                       .openLineage(new OpenLineage(Versions.OPEN_LINEAGE_PRODUCER_URI))
                       .queryExecution(queryExecution)
