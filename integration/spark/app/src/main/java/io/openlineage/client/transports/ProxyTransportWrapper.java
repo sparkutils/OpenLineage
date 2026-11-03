@@ -17,6 +17,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.spark.sql.SparkSession;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -30,17 +32,17 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
 
     private final Transport underlying;
     private final SparkOpenLineageConfig config;
+    // all caches are forced to be concurrent as emitAll will be called from multiple different threads on SparkConnect
     // these events are application level, captured but never published
-    private final Map<String, List<OpenLineage.DatasetEvent>> defaultDatasetEvents = new MapMaker().makeMap();
-    private final Map<String, List<OpenLineage.RunEvent>> defaultRunEvents = new MapMaker().makeMap();
-    private final Map<String, List<OpenLineage.JobEvent>> defaultJobEvents = new MapMaker().makeMap();
+    private final Map<String, ConcurrentLinkedQueue<OpenLineage.DatasetEvent>> defaultDatasetEvents = new MapMaker().makeMap();
+    private final Map<String, ConcurrentLinkedQueue<OpenLineage.RunEvent>> defaultRunEvents = new MapMaker().makeMap();
+    private final Map<String, ConcurrentLinkedQueue<OpenLineage.JobEvent>> defaultJobEvents = new MapMaker().makeMap();
 
-    private final Map<SparkSession, List<OpenLineage.DatasetEvent>> datasetEvents;
-    private final Map<SparkSession, List<OpenLineage.RunEvent>> runEvents;
-    private final Map<SparkSession, List<OpenLineage.JobEvent>> jobEvents;
+    private final Map<SparkSession, ConcurrentLinkedQueue<OpenLineage.DatasetEvent>> datasetEvents;
+    private final Map<SparkSession, ConcurrentLinkedQueue<OpenLineage.RunEvent>> runEvents;
+    private final Map<SparkSession, ConcurrentLinkedQueue<OpenLineage.JobEvent>> jobEvents;
     private final OpenLineage ol;
     private final boolean mergeEventsByType = Objects.equals(System.getenv().getOrDefault("OPENLINEAGE__MERGE_EVENTS_BY_TYPE", "true"), "true");
-    private final boolean useWeakRef = Objects.equals(System.getenv().getOrDefault("OPENLINEAGE__PROXY_USE_WEAK_REF", "true"), "true");
     private final String applicationId;
 
     private OpenLineage.TagsJobFacet jobTagFacet;
@@ -50,14 +52,18 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
     public ProxyTransportWrapper(@NonNull SparkOpenLineageConfig config, @NonNull Transport underlying, @NonNull String applicationId) {
         this.underlying = underlying;
         this.config = config;
+
+        boolean useWeakRef = Objects.equals(System.getenv().getOrDefault("OPENLINEAGE__PROXY_USE_WEAK_REF", "true"), "true");
+        int concurrencyLevel = Integer.parseInt(System.getenv().getOrDefault("OPENLINEAGE__PROXY_CONCURRENCY_LEVEL", "4"));
+
         if (useWeakRef) {
-            this.runEvents = new MapMaker().weakKeys().makeMap();
-            this.jobEvents = new MapMaker().weakKeys().makeMap();
+            this.runEvents = new MapMaker().concurrencyLevel(concurrencyLevel).weakKeys().makeMap();
+            this.jobEvents = new MapMaker().concurrencyLevel(concurrencyLevel).weakKeys().makeMap();
         } else {
-            this.runEvents = new MapMaker().makeMap();
-            this.jobEvents = new MapMaker().makeMap();
+            this.runEvents = new MapMaker().concurrencyLevel(concurrencyLevel).makeMap();
+            this.jobEvents = new MapMaker().concurrencyLevel(concurrencyLevel).makeMap();
         }
-        this.datasetEvents = new MapMaker().weakKeys().makeMap();
+        this.datasetEvents = new MapMaker().concurrencyLevel(concurrencyLevel).weakKeys().makeMap();
         this.ol = new OpenLineage(Versions.OPEN_LINEAGE_PRODUCER_URI);
         ProxyTransportRemote.setControllable(this);
         this.applicationId = applicationId;
@@ -116,12 +122,12 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
 
         var runRecords = runEvents.remove(activeSession());
         if (runRecords == null) {
-            runRecords = new ArrayList<>();
+            runRecords = new ConcurrentLinkedQueue<>();
         }
 
         var jobRecords = jobEvents.remove(activeSession());
         if (jobRecords == null) {
-            jobRecords = new ArrayList<>();
+            jobRecords = new ConcurrentLinkedQueue<>();
         }
 
         if (!runRecords.isEmpty()) {
@@ -365,18 +371,14 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
         }
     }
 
-    public static <K, T extends OpenLineage.BaseEvent> List<T> putOrAppend(Map<K, List<T>> dict, K key, T event) {
-        if (dict.containsKey(key)) {
-            dict.get(key).add(event);
-        } else {
-            dict.put(key, new LinkedList<>() {{
-                add(event);
-            }});
-        }
-        return dict.get(key);
+    public static <K, T extends OpenLineage.BaseEvent> ConcurrentLinkedQueue<T> putOrAppend(Map<K, ConcurrentLinkedQueue<T>> dict, K key, T event) {
+        dict.putIfAbsent(key, new ConcurrentLinkedQueue<>());
+        var q = dict.get(key);
+        q.add(event);
+        return q;
     }
 
-    public static <T extends OpenLineage.BaseEvent> List<T> putOrAppend(Map<SparkSession, List<T>> dict, Map<String, List<T>> defaultDict, SparkSession key, String applicationId, T event) {
+    public static <T extends OpenLineage.BaseEvent> ConcurrentLinkedQueue<T> putOrAppend(Map<SparkSession, ConcurrentLinkedQueue<T>> dict, Map<String, ConcurrentLinkedQueue<T>> defaultDict, SparkSession key, String applicationId, T event) {
         log.debug("storing event {} before emitting: [ {} ]", event.getClass().getCanonicalName(), OpenLineageClientUtils.toJson(event));
         if (key != null) {
             return putOrAppend(dict, key, event);
