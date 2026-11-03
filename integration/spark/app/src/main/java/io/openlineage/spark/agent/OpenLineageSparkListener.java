@@ -164,34 +164,31 @@ public class OpenLineageSparkListener extends org.apache.spark.scheduler.SparkLi
   private void sparkSQLExecEnd(SparkListenerSQLExecutionEnd endEvent) {
       SparkSession osess = SparkSession.getActiveSession().getOrElse(() -> null);
       try {
-          var que = SQLExecution.getQueryExecution(endEvent.executionId());
-          if (que != null) {
-              var sess = Spark4CompatUtils.getSparkSession(que);
-              SparkSession.setActiveSession(sess);
-          }
+          var sess = Spark4CompatUtils.getSparkSession(endEvent.qe());
+          SparkSession.setActiveSession(sess);
 
           log.debug("sparkSQLExecEnd with activeJobId {}", activeJobId);
-    ExecutionContext context = sparkSqlExecutionRegistry.remove(endEvent.executionId());
-    meterRegistry.counter("openlineage.spark.event.sql.end").increment();
-    if (context != null) {
-      circuitBreaker.run(
-          () -> {
-            activeJobId.ifPresent(context::setActiveJobId);
-            context.end(endEvent);
-            return null;
-          });
-    } else {
-      contextFactory
-          .createSparkSQLExecutionContext(endEvent)
-          .ifPresent(
-              c ->
-                  circuitBreaker.run(
-                      () -> {
-                        activeJobId.ifPresent(c::setActiveJobId);
-                        c.end(endEvent);
-                        return null;
-                      }));
-    }
+            ExecutionContext context = sparkSqlExecutionRegistry.remove(endEvent.executionId());
+            meterRegistry.counter("openlineage.spark.event.sql.end").increment();
+            if (context != null) {
+              circuitBreaker.run(
+                  () -> {
+                    activeJobId.ifPresent(context::setActiveJobId);
+                    context.end(endEvent);
+                    return null;
+                  });
+            } else {
+              contextFactory
+                  .createSparkSQLExecutionContext(endEvent)
+                  .ifPresent(
+                      c ->
+                          circuitBreaker.run(
+                              () -> {
+                                activeJobId.ifPresent(c::setActiveJobId);
+                                c.end(endEvent);
+                                return null;
+                              }));
+            }
       } finally {
           SparkSession.setActiveSession(osess);
       }
