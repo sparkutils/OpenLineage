@@ -73,8 +73,11 @@ public class EventEmitter {
 
     var transport = new TransportFactory(config.getTransportConfig()).build();
 
+    this.applicationRunId =
+       this.overriddenApplicationRunId.map(UUID::fromString).orElse(UUIDUtils.generateNewUUID());
+
     if (useProxy) {
-      transport = new ProxyTransportWrapper(config, transport);
+      transport = new ProxyTransportWrapper(config, transport, this.applicationRunId.toString());
     }
 
     this.client =
@@ -83,8 +86,7 @@ public class EventEmitter {
             .disableFacets(disabledFacets.toArray(new String[0]))
             .build();
     this.applicationJobName = this.overriddenAppName.orElse(applicationJobName);
-    this.applicationRunId =
-        this.overriddenApplicationRunId.map(UUID::fromString).orElse(UUIDUtils.generateNewUUID());
+
   }
 
   public void emit(OpenLineage.RunEvent event) {

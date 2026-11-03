@@ -53,7 +53,8 @@ import static io.openlineage.spark.agent.ArgumentParser.SPARK_CONF_PARENT_RUN_ID
  */
 @Builder
 public class OpenLineageContext {
-  // filled up only for SparkListenerApplication{Start,End} events
+
+    // filled up only for SparkListenerApplication{Start,End} events
   @Setter @Getter UUID applicationUuid;
 
   // The Spark-version-specific DatasetBuilderFactory, used to source version-specific catalog

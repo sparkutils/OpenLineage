@@ -30,38 +30,46 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
 
     private final Transport underlying;
     private final SparkOpenLineageConfig config;
-    private final Map<String, List<OpenLineage.DatasetEvent>> datasetEvents;
-    private final Map<String, List<OpenLineage.RunEvent>> runEvents;
-    private final Map<String, List<OpenLineage.JobEvent>> jobEvents;
+    // these events are application level, captured but never published
+    private final Map<String, List<OpenLineage.DatasetEvent>> defaultDatasetEvents = new MapMaker().makeMap();
+    private final Map<String, List<OpenLineage.RunEvent>> defaultRunEvents = new MapMaker().makeMap();
+    private final Map<String, List<OpenLineage.JobEvent>> defaultJobEvents = new MapMaker().makeMap();
+
+    private final Map<SparkSession, List<OpenLineage.DatasetEvent>> datasetEvents;
+    private final Map<SparkSession, List<OpenLineage.RunEvent>> runEvents;
+    private final Map<SparkSession, List<OpenLineage.JobEvent>> jobEvents;
     private final OpenLineage ol;
     private final boolean mergeEventsByType = Objects.equals(System.getenv().getOrDefault("OPENLINEAGE__MERGE_EVENTS_BY_TYPE", "true"), "true");
-    private final boolean useWeakRef = Objects.equals(System.getenv().getOrDefault("OPENLINEAGE__PROXY_USE_WEAK_REF", "false"), "true");
+    private final boolean useWeakRef = Objects.equals(System.getenv().getOrDefault("OPENLINEAGE__PROXY_USE_WEAK_REF", "true"), "true");
+    private final String applicationId;
 
     private OpenLineage.TagsJobFacet jobTagFacet;
     private OpenLineage.TagsRunFacet runTagFacet;
     private String parentRunID;
 
-    public ProxyTransportWrapper(@NonNull SparkOpenLineageConfig config, @NonNull Transport underlying) {
+    public ProxyTransportWrapper(@NonNull SparkOpenLineageConfig config, @NonNull Transport underlying, @NonNull String applicationId) {
         this.underlying = underlying;
         this.config = config;
         if (useWeakRef) {
-            this.runEvents = new MapMaker().weakValues().makeMap();
-            this.jobEvents = new MapMaker().weakValues().makeMap();
+            this.runEvents = new MapMaker().weakKeys().makeMap();
+            this.jobEvents = new MapMaker().weakKeys().makeMap();
         } else {
             this.runEvents = new MapMaker().makeMap();
             this.jobEvents = new MapMaker().makeMap();
         }
-        this.datasetEvents = new MapMaker().weakValues().makeMap();
+        this.datasetEvents = new MapMaker().weakKeys().makeMap();
         this.ol = new OpenLineage(Versions.OPEN_LINEAGE_PRODUCER_URI);
         ProxyTransportRemote.setControllable(this);
+        this.applicationId = applicationId;
     }
-
 
     @Override
     public void emit(@NonNull OpenLineage.RunEvent event) {
         putOrAppend(
                 runEvents,
-                getParentRunID(),
+                defaultRunEvents,
+                activeSession(),
+                applicationId,
                 EventMergerV2.combine(
                         ol,
                         event,
@@ -81,7 +89,9 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
     public void emit(@NonNull OpenLineage.JobEvent event) {
         putOrAppend(
                 jobEvents,
-                getParentRunID(),
+                defaultJobEvents,
+                activeSession(),
+                applicationId,
                 EventMergerV2.combine(
                         ol,
                         event,
@@ -95,27 +105,21 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
         underlying.close();
     }
 
-    /**
-     * @return an new {@link Builder} object for building {@link ProxyTransportWrapper}s.
-     */
-    public static Builder builder() {
-        return new Builder();
-    }
-
     @Override
     public void emitAll() {
         emitAll(getParentRunID());
     }
 
+    // runId is ignored
     @Override
-    public void emitAll(String runId) {
+    public void emitAll(String runId2) {
 
-        var runRecords = runEvents.remove(runId);
+        var runRecords = runEvents.remove(activeSession());
         if (runRecords == null) {
             runRecords = new ArrayList<>();
         }
 
-        var jobRecords = jobEvents.remove(runId);
+        var jobRecords = jobEvents.remove(activeSession());
         if (jobRecords == null) {
             jobRecords = new ArrayList<>();
         }
@@ -353,8 +357,15 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
         log.debug("emitting event json: [ {} }", json);
     }
 
-    public static <T extends OpenLineage.BaseEvent> List<T> putOrAppend(Map<String, List<T>> dict, String key, T event) {
-        log.debug("storing event {} before emitting: [ {} ]", event.getClass().getCanonicalName(), OpenLineageClientUtils.toJson(event));
+    private static SparkSession activeSession() {
+        if (SparkSession.getActiveSession().isDefined()) {
+            return SparkSession.getActiveSession().get();
+        } else {
+            return null;
+        }
+    }
+
+    public static <K, T extends OpenLineage.BaseEvent> List<T> putOrAppend(Map<K, List<T>> dict, K key, T event) {
         if (dict.containsKey(key)) {
             dict.get(key).add(event);
         } else {
@@ -363,6 +374,15 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
             }});
         }
         return dict.get(key);
+    }
+
+    public static <T extends OpenLineage.BaseEvent> List<T> putOrAppend(Map<SparkSession, List<T>> dict, Map<String, List<T>> defaultDict, SparkSession key, String applicationId, T event) {
+        log.debug("storing event {} before emitting: [ {} ]", event.getClass().getCanonicalName(), OpenLineageClientUtils.toJson(event));
+        if (key != null) {
+            return putOrAppend(dict, key, event);
+        } else {
+            return putOrAppend(defaultDict, applicationId, event);
+        }
     }
 
     public static List<TagField> getTagsFromSparkSession(String key) {
@@ -389,43 +409,6 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
                     return new TagField(key, value);
                 })
                 .collect(Collectors.toList());
-    }
-
-    /**
-     * Builder for {@link ProxyTransportWrapper} instances.
-     *
-     */
-    @Deprecated
-    public static final class Builder {
-
-        @Delegate
-        private Transport transport;
-
-        @Delegate
-        private SparkOpenLineageConfig config;
-
-        private Builder() {
-
-        }
-
-        public Builder underlying(@NonNull Transport transport) {
-            this.transport = transport;
-            return this;
-        }
-
-        public Builder config(@NonNull SparkOpenLineageConfig config) {
-            this.config = config;
-            return this;
-        }
-
-        /**
-         * @return an {@link ProxyTransportWrapper} object with the properties of this {@link
-         * Builder}.
-         */
-        public ProxyTransportWrapper build() {
-
-            return new ProxyTransportWrapper(config, transport);
-        }
     }
 
 }
