@@ -113,12 +113,6 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
 
     @Override
     public void emitAll() {
-        emitAll(getParentRunID());
-    }
-
-    // runId is ignored
-    @Override
-    public void emitAll(String runId2) {
 
         var runRecords = runEvents.remove(activeSession());
         if (runRecords == null) {
@@ -294,31 +288,6 @@ public final class ProxyTransportWrapper extends Transport implements ProxyTrans
     private OpenLineage.DatasetEvent mergeDatasets(OpenLineage.DatasetEvent left, OpenLineage.DatasetEvent right) {
         // TODO: implement method
         return left;
-    }
-
-    private String getParentRunID() {
-        if (parentRunID == null) {
-            var conf = SparkSessionUtils.activeSession().map(SparkSession::conf);
-            var notFound = "undefined";
-            if (conf.isPresent()) {
-                var entry = conf.flatMap(x -> {
-                    if (x.contains(SPARK_CONF_PARENT_RUN_ID))
-                        return Optional.ofNullable(x.get(SPARK_CONF_PARENT_RUN_ID));
-                    else
-                        return Optional.empty();
-                });
-                if (entry.isPresent()) {
-                    parentRunID = entry.get();
-                } else {
-                    log.error("spark config does not contain key: " + SPARK_CONF_PARENT_RUN_ID);
-                    parentRunID = notFound;
-                }
-            } else {
-                log.error("no spark session or config is present");
-                parentRunID = notFound;
-            }
-        }
-        return parentRunID;
     }
 
     public static List<TagField> parseJobTagsFromConfig(SparkOpenLineageConfig config) {
